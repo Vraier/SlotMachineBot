@@ -19,13 +19,15 @@
           pythonEnv = pkgs.python3.withPackages (ps: with ps; [
             opencv4
             numpy
+            matplotlib
           ]);
         in
         {
           default = pkgs.mkShell {
             packages = [
               pythonEnv
-              pkgs.grim
+              pkgs.grim # for screenshots
+              pkgs.ydotool # for mouse clicking
             ];
           };
         }

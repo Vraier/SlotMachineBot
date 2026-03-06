@@ -1,8 +1,11 @@
 import os
 import subprocess
+import time
 
 import cv2
 import numpy as np
+
+from model import solve_dp
 
 ICON_NAMES = ["coin", "triple_coin", "clover", "2x", "snake", "net", "crown", "nothing"]
 
@@ -20,6 +23,8 @@ WHEEL_POSITIONS = [
     {"top": 602, "left": 1305, "width": 172, "height": 248},
     {"top": 602, "left": 1500, "width": 172, "height": 248},
 ]
+
+ARM_POSITION = {"x": 1750, "y": 650}
 
 
 def capture_wayland_screen(monitor_name="DP-1"):
@@ -50,7 +55,7 @@ def get_slot_state():
         img_gray = full_screen_gray[t : t + h, l : l + w]
 
         best_match = "unknown"
-        highest_confidence = 0.6  # only append if confidence is higher than 0.6
+        highest_confidence = 0.6
 
         for name, template in templates.items():
             if template is None:
@@ -66,94 +71,77 @@ def get_slot_state():
     return tuple(current_state)
 
 
-WHEEL_PROBABILITY = {
-    "nothing": 0.27,
-    "coin": 0.30,
-    "snake": 0.10,
-    "triple_coin": 0.10,
-    "net": 0.04,
-    "2x": 0.10,
-    "clover": 0.01,
-    "crown": 0.08,
-}
+def click_wheel(wheel_idx):
+    """Calculates the center of a wheel and uses ydotool to click it."""
+    wheel = WHEEL_POSITIONS[wheel_idx]
+
+    center_x = wheel["left"] + (wheel["width"] // 2)
+    center_y = wheel["top"] + (wheel["height"] // 2)
+
+    print(f"Moving mouse to Wheel {wheel_idx + 1} at ({center_x}, {center_y})")
+
+    subprocess.run(["ydotool", "mousemove", "-a", str(center_x), str(center_y)])
+    time.sleep(0.1)
+    subprocess.run(["ydotool", "click", "1"])
 
 
-def calculate_payout(state):
-    """Calculates the reward for a given terminal state."""
-    counts = {icon: state.count(icon) for icon in ICON_NAMES}
-    reward = 0
-
-    if counts["crown"] == 4:
-        reward += 100
-
-    if counts["coin"] == 4:
-        reward += 9
-    elif counts["coin"] == 3:
-        reward += 3
-
-    if counts["triple_coin"] == 4:
-        reward += 15
-    elif counts["triple_coin"] == 3:
-        reward += 9
-
-    reward += counts["clover"] * 10
-
-    if counts["snake"] > 0:
-        reward = 0
-        if counts["net"] > 0:
-            reward += counts["snake"] * 3
-        else:
-            reward = 0
-
-    for _ in range(counts["2x"]):
-        reward *= 2
-
-    return reward
-
-
-dp_memo = {}
-
-
-def solve_dp(state, rerolls_left):
-    if rerolls_left == 0:
-        return calculate_payout(state), "stop"
-
-    memo_key = (state, rerolls_left)
-    if memo_key in dp_memo:
-        return dp_memo[memo_key]
-
-    best_value = calculate_payout(state)
-    best_action = "stop"
-
-    for wheel_idx in range(4):
-        # Rerolling costs 1 coin upfront
-        expected_value_of_reroll = -1.0
-
-        for outcome_icon, probability in WHEEL_PROBABILITY.items():
-            new_state = list(state)
-            new_state[wheel_idx] = outcome_icon
-            new_state = tuple(new_state)
-
-            val_of_outcome, _ = solve_dp(new_state, rerolls_left - 1)
-            expected_value_of_reroll += probability * val_of_outcome
-
-        if expected_value_of_reroll > best_value:
-            best_value = expected_value_of_reroll
-            best_action = wheel_idx
-
-    dp_memo[memo_key] = (best_value, best_action)
-    return best_value, best_action
+def pull_arm():
+    """Moves the mouse to the arm and clicks it to start a new game."""
+    print("Pulling the arm...")
+    subprocess.run(
+        ["ydotool", "mousemove", "-a", str(ARM_POSITION["x"]), str(ARM_POSITION["y"])]
+    )
+    time.sleep(0.1)
+    subprocess.run(["ydotool", "click", "1"])
 
 
 if __name__ == "__main__":
-    state = ("coin", "coin", "triple_coin", "triple_coin")
-    rerolls = 3
-    print(f"Current State: {state}")
+    # Configuration
+    SPIN_ANIMATION_TIME = 2.5
+    PAYOUT_ANIMATION_TIME = (
+        3.0  # Time to wait for the score to tally before pulling arm again
+    )
+    MAX_REROLLS = 5
 
-    expected_val, action = solve_dp(state, rerolls)
+    print("Blue Prince Auto-Bot Initialized")
+    print("--------------------------------")
+    print("Press Ctrl+C in this terminal to stop the script.\n")
 
-    print(f"Expected Return: {expected_val:.3f} coins")
-    if action == "stop":
-        print("Optimal Move: STOP PLAYING (Take the payout!)")
-    else:
-        print(f"Optimal Move: REROLL WHEEL {action + 1}")
+    input("Set up your game window, then press [Enter] to start the infinite loop...")
+
+    while True:
+        rerolls_left = MAX_REROLLS
+        print("\n=== NEW GAME ===")
+        pull_arm()
+
+        # Wait for the initial 4 wheels to spin before taking the first screenshot
+        print(f"Waiting {SPIN_ANIMATION_TIME}s for initial spin...")
+        time.sleep(SPIN_ANIMATION_TIME)
+
+        while rerolls_left > 0:
+            current_state = get_slot_state()
+            print(f"State: {current_state}")
+
+            if "unknown" in current_state or "error" in current_state:
+                print("Bad read. Trying again in 1 second...")
+                time.sleep(1)
+                continue
+
+            expected_val, action = solve_dp(current_state, rerolls_left)
+            print(f"Expected Return: {expected_val:.2f} | Rerolls left: {rerolls_left}")
+
+            if action == "stop":
+                print("Optimal Move: STOP. Taking the payout.")
+                break
+            else:
+                print(f"Optimal Move: REROLL WHEEL {action + 1}.")
+                click_wheel(action)
+                rerolls_left -= 1
+
+                print(f"Waiting {SPIN_ANIMATION_TIME}s for wheel to spin...")
+                time.sleep(SPIN_ANIMATION_TIME)
+
+        print("\nGame Finished.")
+        print(f"Final state was: {current_state}")
+        print(f"Waiting {PAYOUT_ANIMATION_TIME}s for payout to process...")
+        time.sleep(PAYOUT_ANIMATION_TIME)
